@@ -15,6 +15,13 @@ import collections
 from subprocess import Popen, PIPE
 import zipfile
 
+# When onnx is built against a version of protobuf that is older than
+# that which is vendored with caffe2, onnx will crash if caffe2's
+# vendored protobuf is loaded first. We can work around this by
+# importing onnx first, which will cause it to go out and pick up the
+# system protobuf.
+import onnx.backend
+
 import caffe2
 from caffe2.python import core, workspace, rnn_cell, gru_cell
 from caffe2.python.model_helper import ModelHelper
@@ -31,7 +38,6 @@ from onnx.backend.base import Backend, Device, DeviceType, namedtupledict
 from caffe2.python.onnx.workspace import Workspace
 from caffe2.python.onnx.backend_rep import Caffe2Rep
 from caffe2.python.onnx.backend_cpp_rep import Caffe2CppRep
-from caffe2.python.onnx.helper import dummy_name
 
 import caffe2.python._import_c_extension as C
 
@@ -173,6 +179,13 @@ class Caffe2Backend(Backend):
         'RNN': '_create_rnn',
     }
 
+    # Dummy name generator
+    _dummy_name = C.DummyName()
+
+    @classmethod
+    def dummy_name(cls):
+        return cls._dummy_name.new_dummy_name()
+
     # NB: By default, you will use the LATEST definition of the operator,
     # so this interface MAY make BC-breaking changes.  Specify an
     # opset_version if you don't want this to version.
@@ -181,18 +194,19 @@ class Caffe2Backend(Backend):
         super(Caffe2Backend, cls).run_node(node, inputs, device=device, outputs_info=outputs_info)
 
         device_option = get_device_option(Device(device))
-        with Workspace(), core.DeviceScope(device_option):  # temporary!
+        ws = Workspace()
+        with core.DeviceScope(device_option):  # temporary!
             if isinstance(inputs, dict):
                 for key, value in inputs.items():
-                    workspace.FeedBlob(key, value)
+                    ws.FeedBlob(key, value)
             else:
                 assert len(node.input) == len(inputs), "{}: expected {} but got {}".format(
                     node.op_type, len(node.input), len(inputs))
                 for key, value in zip(node.input, inputs):
-                    workspace.FeedBlob(key, value)
+                    ws.FeedBlob(key, value)
 
             ops = []
-            cbackend = C.Caffe2Backend()
+            cbackend = C.Caffe2Backend(cls._dummy_name)
             ops_str = cbackend.convert_node(node.SerializeToString(), opset_version)
             for s in ops_str[0] + ops_str[1]:
                 op = caffe2_pb2.OperatorDef()
@@ -207,8 +221,8 @@ class Caffe2Backend(Backend):
                 for op in ops2:
                     op.device_option.CopyFrom(device_option)
                 print("\nC++:\n{}\nPython:\n{}".format(ops, ops2))
-            workspace.RunOperatorsOnce(ops)
-            output_values = [workspace.FetchBlob(name) for name in node.output]
+            ws.RunOperatorsOnce(ops)
+            output_values = [ws.FetchBlob(name) for name in node.output]
             return namedtupledict('Outputs', node.output)(*output_values)
 
     @classmethod
@@ -327,7 +341,7 @@ class Caffe2Backend(Backend):
         pred_mh = ModelHelper()
 
         def make_rnn(direction_offset):
-            name = dummy_name()
+            name = cls.dummy_name()
 
             # input and recurrence biases are squashed together in
             # onnx but not in caffe2
@@ -353,9 +367,21 @@ class Caffe2Backend(Backend):
                            starts=[direction_offset + 0, 0, 0],
                            ends  =[direction_offset + 1,-1,-1])
 
+
+            if direction_offset == 1:
+                if sequence_lens is not None:
+                    seq_lens_for_reverse = sequence_lens
+                else:
+                    input_shape = pred_mh.net.Shape(input_blob, name + '/input_shape')
+                    batch_size = pred_mh.net.Slice(input_shape, name + '/batch_size_slice', starts=[1], ends=[2])
+                    seq_len = pred_mh.net.Slice(input_shape, name + '/seq_len_slice', starts=[0], ends=[1])
+                    dummy_sequence_lens = pred_mh.net.Tile([seq_len, batch_size], name + '/dummy_sequence_lens', axis=0)
+                    pred_mh.net.Reshape(dummy_sequence_lens, [dummy_sequence_lens, cls.dummy_name()], shape=[-1])
+                    seq_lens_for_reverse = dummy_sequence_lens
+
             if direction_offset == 1:
                 input = pred_mh.net.ReversePackedSegs(
-                    [input_blob, sequence_lens], name + "/input-reversed")
+                    [input_blob, seq_lens_for_reverse], name + "/input-reversed")
             else:
                 input = input_blob
 
@@ -374,7 +400,7 @@ class Caffe2Backend(Backend):
 
             if direction_offset == 1:
                 hidden_t_all = pred_mh.net.ReversePackedSegs(
-                    [hidden_t_all, sequence_lens], name + "/output-reversed")
+                    [hidden_t_all, seq_lens_for_reverse], name + "/output-reversed")
 
             return hidden_t_all, hidden_t_last
 
@@ -394,9 +420,9 @@ class Caffe2Backend(Backend):
             hidden_t_all_f, hidden_t_last_f = make_rnn(0)
             hidden_t_all_b, hidden_t_last_b = make_rnn(1)
             pred_mh.net.Concat([hidden_t_all_f, hidden_t_all_b],
-                               [n.outputs[0], dummy_name()], axis=2)
+                               [n.outputs[0], cls.dummy_name()], axis=2)
             pred_mh.net.Concat([hidden_t_last_f, hidden_t_last_b],
-                               [n.outputs[1], dummy_name()], axis=0)
+                               [n.outputs[1], cls.dummy_name()], axis=0)
 
         if sequence_lens is not None:
             pred_mh.net.VariableLengthSequencePadding(
@@ -430,7 +456,7 @@ class Caffe2Backend(Backend):
         pred_mh = ModelHelper()
 
         def make_lstm(direction_offset):
-            name = dummy_name()
+            name = cls.dummy_name()
 
             # input and recurrence biases are squashed together in
             # onnx but not in caffe2
@@ -463,7 +489,7 @@ class Caffe2Backend(Backend):
                     dim0 = i * hidden_size, (i+1) * hidden_size
                     starts, ends = zip(dim0, *extra_dims)
                     init_net.Slice(name_from, x, starts=starts, ends=ends)
-                init_net.Concat([xi, xf, xo, xc], ['%s/%s' % (name, name_to), dummy_name()], axis=0)
+                init_net.Concat([xi, xf, xo, xc], ['%s/%s' % (name, name_to), cls.dummy_name()], axis=0)
 
             initial_h_sliced = name + '/initial_h'
             init_net.Slice(initial_h, initial_h_sliced,
@@ -475,8 +501,19 @@ class Caffe2Backend(Backend):
                            ends  =[direction_offset + 1,-1,-1])
 
             if direction_offset == 1:
+                if sequence_lens is not None:
+                    seq_lens_for_reverse = sequence_lens
+                else:
+                    input_shape = pred_mh.net.Shape(input_blob, name + '/input_shape')
+                    batch_size = pred_mh.net.Slice(input_shape, name + '/batch_size_slice', starts=[1], ends=[2])
+                    seq_len = pred_mh.net.Slice(input_shape, name + '/seq_len_slice', starts=[0], ends=[1])
+                    dummy_sequence_lens = pred_mh.net.Tile([seq_len, batch_size], name + '/dummy_sequence_lens', axis=0)
+                    pred_mh.net.Reshape(dummy_sequence_lens, [dummy_sequence_lens, cls.dummy_name()], shape=[-1])
+                    seq_lens_for_reverse = dummy_sequence_lens
+
+            if direction_offset == 1:
                 input = pred_mh.net.ReversePackedSegs(
-                    [input_blob, sequence_lens], name + "/input-reversed")
+                    [input_blob, seq_lens_for_reverse], name + "/input-reversed")
             else:
                 input = input_blob
 
@@ -495,7 +532,7 @@ class Caffe2Backend(Backend):
 
             if direction_offset == 1:
                 hidden_t_all = pred_mh.net.ReversePackedSegs(
-                    [hidden_t_all, sequence_lens], name + "/output-reversed")
+                    [hidden_t_all, seq_lens_for_reverse], name + "/output-reversed")
 
             return hidden_t_all, hidden_t_last, cell_last
 
@@ -516,11 +553,11 @@ class Caffe2Backend(Backend):
             hidden_t_all_f, hidden_t_last_f, cell_last_f = make_lstm(0)
             hidden_t_all_b, hidden_t_last_b, cell_last_b = make_lstm(1)
             pred_mh.net.Concat([hidden_t_all_f, hidden_t_all_b],
-                               [n.outputs[0], dummy_name()], axis=2)
+                               [n.outputs[0], cls.dummy_name()], axis=2)
             pred_mh.net.Concat([hidden_t_last_f, hidden_t_last_b],
-                               [n.outputs[1], dummy_name()], axis=0)
+                               [n.outputs[1], cls.dummy_name()], axis=0)
             pred_mh.net.Concat([cell_last_f, cell_last_b],
-                               [n.outputs[2], dummy_name()], axis=0)
+                               [n.outputs[2], cls.dummy_name()], axis=0)
 
         if sequence_lens is not None:
             pred_mh.net.VariableLengthSequencePadding(
@@ -555,7 +592,7 @@ class Caffe2Backend(Backend):
         pred_mh = ModelHelper()
 
         def make_gru(direction_offset):
-            name = dummy_name()
+            name = cls.dummy_name()
 
             # input and recurrence biases are squashed together in
             # onnx but not in caffe2
@@ -589,7 +626,7 @@ class Caffe2Backend(Backend):
                     starts, ends = zip(dim0, *extra_dims)
                     init_net.Slice(name_from, x, starts=starts, ends=ends)
                 if do_concat:
-                    init_net.Concat([xr, xz, xh], ['%s/%s' % (name, name_to), dummy_name()], axis=0)
+                    init_net.Concat([xr, xz, xh], ['%s/%s' % (name, name_to), cls.dummy_name()], axis=0)
 
             initial_h_sliced = name + '/initial_h'
             init_net.Slice(initial_h, initial_h_sliced,
@@ -597,8 +634,19 @@ class Caffe2Backend(Backend):
                            ends  =[direction_offset + 1,-1,-1])
 
             if direction_offset == 1:
+                if sequence_lens is not None:
+                    seq_lens_for_reverse = sequence_lens
+                else:
+                    input_shape = pred_mh.net.Shape(input_blob, name + '/input_shape')
+                    batch_size = pred_mh.net.Slice(input_shape, name + '/batch_size_slice', starts=[1], ends=[2])
+                    seq_len = pred_mh.net.Slice(input_shape, name + '/seq_len_slice', starts=[0], ends=[1])
+                    dummy_sequence_lens = pred_mh.net.Tile([seq_len, batch_size], name + '/dummy_sequence_lens', axis=0)
+                    pred_mh.net.Reshape(dummy_sequence_lens, [dummy_sequence_lens, cls.dummy_name()], shape=[-1])
+                    seq_lens_for_reverse = dummy_sequence_lens
+
+            if direction_offset == 1:
                 input = pred_mh.net.ReversePackedSegs(
-                    [input_blob, sequence_lens], name + "/input-reversed")
+                    [input_blob, seq_lens_for_reverse], name + "/input-reversed")
             else:
                 input = input_blob
 
@@ -617,7 +665,7 @@ class Caffe2Backend(Backend):
 
             if direction_offset == 1:
                 hidden_t_all = pred_mh.net.ReversePackedSegs(
-                    [hidden_t_all, sequence_lens], name + "/output-reversed")
+                    [hidden_t_all, seq_lens_for_reverse], name + "/output-reversed")
 
             return hidden_t_all, hidden_t_last
 
@@ -637,9 +685,9 @@ class Caffe2Backend(Backend):
             hidden_t_all_f, hidden_t_last_f = make_gru(0)
             hidden_t_all_b, hidden_t_last_b = make_gru(1)
             pred_mh.net.Concat([hidden_t_all_f, hidden_t_all_b],
-                               [n.outputs[0], dummy_name()], axis=2)
+                               [n.outputs[0], cls.dummy_name()], axis=2)
             pred_mh.net.Concat([hidden_t_last_f, hidden_t_last_b],
-                               [n.outputs[1], dummy_name()], axis=0)
+                               [n.outputs[1], cls.dummy_name()], axis=0)
 
         if sequence_lens is not None:
             pred_mh.net.VariableLengthSequencePadding(
@@ -772,8 +820,7 @@ class Caffe2Backend(Backend):
                 opset_version = 1
 
         # Check whether we have RNN related ops
-        pred_model = ModelProto()
-        pred_model.ParseFromString(cls.optimize_onnx(model.SerializeToString(), predict=True))
+        pred_model = cls.optimize_onnx(model, predict=True)
         rnn_nodes = []
         for node in pred_model.graph.node:
             if node.op_type in {'LSTM', 'GRU', 'RNN'}:
@@ -788,8 +835,7 @@ class Caffe2Backend(Backend):
         if use_cpp_backend:
             c2_rnn_ops = []
             if rnn_nodes:
-                init_model = ModelProto()
-                init_model.ParseFromString(cls.optimize_onnx(model.SerializeToString(), init=True))
+                init_model = cls.optimize_onnx(model, init=True)
                 for node in rnn_nodes:
                     c2ops = cls._onnx_node_to_caffe2_op(
                         init_model, pred_model, node, opset_version)
@@ -799,7 +845,7 @@ class Caffe2Backend(Backend):
                     c2_rnn_ops.append(C.Caffe2Ops(init_ops, ops, external_inputs))
                 del init_model
 
-            cbackend = C.Caffe2Backend()
+            cbackend = C.Caffe2Backend(cls._dummy_name)
             rep = cbackend.prepare(model.SerializeToString(), device, c2_rnn_ops)
             # For testing
             # Dump the net descriptions to file for comparison with the Python ones
@@ -848,7 +894,7 @@ class Caffe2Backend(Backend):
     @classmethod
     # TODO: This method needs a refactor for clarity
     def _onnx_node_to_caffe2_op(cls, init_model, pred_model, node_def, opset_version):
-        cbackend = C.Caffe2Backend()
+        cbackend = C.Caffe2Backend(cls._dummy_name)
         if cbackend.support_onnx_import(node_def.op_type):
             op_strs = cbackend.convert_node(node_def.SerializeToString(), opset_version)
             init_ops = []
@@ -930,13 +976,12 @@ class Caffe2Backend(Backend):
 
     @classmethod
     def _onnx_model_to_caffe2_net(cls, onnx_model, device, opset_version, include_initializers):
+
+
         device_option = get_device_option(Device(device))
 
-        init_model = ModelProto()
-        init_model.ParseFromString(cls.optimize_onnx(onnx_model.SerializeToString(), init=True))
-
-        pred_model = ModelProto()
-        pred_model.ParseFromString(cls.optimize_onnx(onnx_model.SerializeToString(), predict=True))
+        init_model = cls.optimize_onnx(onnx_model, init=True)
+        pred_model = cls.optimize_onnx(onnx_model, predict=True)
 
         init_net = caffe2_pb2.NetDef()
         pred_net = caffe2_pb2.NetDef()
@@ -947,7 +992,7 @@ class Caffe2Backend(Backend):
         if include_initializers:
             init_net.op.extend(cls._create_tensor_filling_op(tp) for tp in onnx_model.graph.initializer)
 
-        dummy_name(cls._all_names_in_graph(init_model.graph) | cls._all_names_in_graph(pred_model.graph))
+        cls._dummy_name.reset(cls._all_names_in_graph(init_model.graph) | cls._all_names_in_graph(pred_model.graph))
 
         success = True
         for net, model in ( (init_net, init_model), (pred_net, pred_model) ):

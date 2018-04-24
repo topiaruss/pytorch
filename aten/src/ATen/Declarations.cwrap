@@ -1143,6 +1143,35 @@
     - THTensor* self
 ]]
 [[
+  name: log10_
+  types:
+    - floating_point
+  backends:
+    - CPU
+    - CUDA
+  cname: log10
+  return: self
+  arguments:
+    - THTensor* self
+    - THTensor* self
+]]
+[[
+  name: log10
+  types:
+    - floating_point
+  backends:
+    - CPU
+    - CUDA
+  variants:
+    - method
+    - function
+  return: argument 0
+  arguments:
+    - arg: THTensor* result
+      output: True
+    - THTensor* self
+]]
+[[
   name: log1p_
   types:
     - floating_point
@@ -1157,6 +1186,35 @@
 ]]
 [[
   name: log1p
+  types:
+    - floating_point
+  backends:
+    - CPU
+    - CUDA
+  variants:
+    - method
+    - function
+  return: argument 0
+  arguments:
+    - arg: THTensor* result
+      output: True
+    - THTensor* self
+]]
+[[
+  name: log2_
+  types:
+    - floating_point
+  backends:
+    - CPU
+    - CUDA
+  cname: log2
+  return: self
+  arguments:
+    - THTensor* self
+    - THTensor* self
+]]
+[[
+  name: log2
   types:
     - floating_point
   backends:
@@ -2199,7 +2257,7 @@
         - THTensor* self
 ]]
 [[
-  name: _sum
+  name: _th_sum
   variants:
     - method
     - function
@@ -2228,7 +2286,7 @@
         - THTensor* self
 ]]
 [[
-  name: _prod
+  name: _th_prod
   variants:
     - method
     - function
@@ -2246,7 +2304,8 @@
           default: "false"
 ]]
 [[
-  name: cumsum
+  name: _cumsum
+  cname: cumsum
   variants:
     - method
     - function
@@ -2259,7 +2318,8 @@
       wrap_dim: self
 ]]
 [[
-  name: cumprod
+  name: _cumprod
+  cname: cumprod
   variants:
     - method
     - function
@@ -3176,6 +3236,7 @@
     - Double
   backends:
     - CPU
+    - CUDA
   variants:
     - method
     - function
@@ -3848,7 +3909,19 @@
       arguments:
         - THTensor* self
 ]]
-
+[[
+  name: _sparse_coo_tensor_unsafe
+  return: THTensor*
+  backends:
+    - SparseCPU
+    - SparseCUDA
+  variants: [function]
+  cname: newWithTensorAndSizeUnsafe
+  arguments:
+    - THDenseIndexTensor* indices
+    - THDenseTensor* values
+    - THSize* size
+]]
 [[
   name: _copy_ignoring_overlaps_
   cname: copyIgnoringOverlaps

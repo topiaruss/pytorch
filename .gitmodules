@@ -56,9 +56,6 @@
 [submodule "third_party/NNPACK_deps/psimd"]
 	path = third_party/psimd
 	url = https://github.com/Maratyszcza/psimd.git
-[submodule "third_party/aten"]
-	path = third_party/aten
-	url = https://github.com/zdevito/aten
 [submodule "third_party/zstd"]
 	path = third_party/zstd
 	url = https://github.com/facebook/zstd.git
@@ -80,3 +77,6 @@
 [submodule "third_party/onnx"]
 	path = third_party/onnx
 	url = https://github.com/onnx/onnx.git
+[submodule "third_party/ideep"]
+	path = third_party/ideep
+	url = https://github.com/intel/ideep.git

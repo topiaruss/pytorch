@@ -117,6 +117,11 @@ endfunction()
 # Helper function to automatically generate __init__.py files where python
 # sources reside but there are no __init__.py present.
 function(caffe_autogen_init_py_files)
+  if (CAFFE2_AUTOGEN_INIT_PY_ALREADY_RUN)
+    message(STATUS
+        "A previous caffe2 cmake run already created the __init__.py files.")
+    return()
+  endif()
   file(GLOB_RECURSE all_python_files RELATIVE ${PROJECT_SOURCE_DIR}
        "${PROJECT_SOURCE_DIR}/caffe2/*.py")
   set(python_paths_need_init_py)
@@ -142,6 +147,8 @@ function(caffe_autogen_init_py_files)
       file(WRITE ${tmp}/__init__.py "")
     endif()
   endforeach()
+  set(CAFFE2_AUTOGEN_INIT_PY_ALREADY_RUN TRUE CACHE INTERNAL
+      "Helper variable to record if autogen_init_py is already run or not.")
 endfunction()
 
 ###
@@ -164,11 +171,10 @@ function(dedent outvar text)
     set(_python_exe "${PYTHON_EXECUTABLE}")
   endif()
   set(_fixup_cmd "import sys; from textwrap import dedent; print(dedent(sys.stdin.read()))")
-  # Use echo to pipe the text to python's stdinput. This prevents us from
-  # needing to worry about any sort of special escaping.
+  file(WRITE "${CMAKE_BINARY_DIR}/indented.txt" "${text}")
   execute_process(
-    COMMAND echo "${text}"
     COMMAND "${_python_exe}" -c "${_fixup_cmd}"
+    INPUT_FILE "${CMAKE_BINARY_DIR}/indented.txt"
     RESULT_VARIABLE _dedent_exitcode
     OUTPUT_VARIABLE _dedent_text)
   if(NOT ${_dedent_exitcode} EQUAL 0)
