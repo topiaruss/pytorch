@@ -23,9 +23,8 @@ ENV PATH /opt/conda/bin:$PATH
 # This must be done before pip so that requirements.txt is available
 WORKDIR /opt/pytorch
 COPY . .
-# attempt to prevent 'Not a git repository (or any of the parent directories): .git'
-COPY .git .
 
+# attempt to prevent 'Not a git repository (or any of the parent directories): .git'
 RUN ls -al .
 RUN pwd
 RUN git init
