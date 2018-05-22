@@ -1,3 +1,12 @@
+# Topia fork
+```bash
+docker build -t pytorch -f docker/pytorch/Dockerfile .
+docker login
+docker tag pytorch:latest topiaruss/pytorch:working
+docker push topiaruss/pytorch:working
+```
+
+
 <p align="center"><img width="40%" src="docs/source/_static/img/pytorch-logo-dark.png" /></p>
 
 --------------------------------------------------------------------------------
